@@ -1,0 +1,6 @@
+{
+  "name": "Windows Android",
+  "description": "Automated zero-touch wired scrcpy preparation and USB debugging recovery tool for broken screens.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

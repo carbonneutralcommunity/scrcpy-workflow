@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Windows Android</string>
+    <string name="accessibility_service_label">Windows Android Auto-Allow Service</string>
+    <string name="accessibility_service_description">Automatically confirms USB debugging authorization prompts to enable scrcpy mirroring on devices with broken displays.</string>
+</resources>
