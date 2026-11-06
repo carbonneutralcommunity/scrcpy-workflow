@@ -20,16 +20,26 @@ sealed class RoutineState {
     object Idle : RoutineState()
     object Running : RoutineState()
     object Success : RoutineState()
-    data class Error(val step: Int, val message: String, val isPermissionMissing: Boolean, val isAutoBlockerSuspected: Boolean) : RoutineState()
+    data class Error(
+        val step: Int,
+        val message: String,
+        val isPermissionMissing: Boolean,
+        val isAutoBlockerSuspected: Boolean,
+        val fixCommand: String? = null
+    ) : RoutineState()
 }
 
 data class StepStatus(
     val step1DevOptions: Boolean = false,
+    val step1WasAlreadyOn: Boolean = false,
     val step2AdbEnabled: Boolean = false,
+    val step2WasAlreadyOn: Boolean = false,
     val step3AccessibilityEnabled: Boolean = false,
     val step4AllOkAlarm: Boolean = false,
+    val isAdbTimeoutDisabled: Boolean = false,
     val isRunning: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val fixCommand: String? = null
 )
 
 object RescueEngine {
@@ -44,19 +54,27 @@ object RescueEngine {
     private var isExecuting = false
     private var lastExecutionTime = 0L
 
+    fun getFixCommand(context: Context): String {
+        return "adb shell pm grant ${context.packageName} android.permission.WRITE_SECURE_SETTINGS"
+    }
+
     fun hasWriteSecureSettingsPermission(context: Context): Boolean {
         return context.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
     }
 
-    fun executeRoutineAsync(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
+    fun executeRoutineAsync(
+        context: Context,
+        triggerAlarmOnSuccess: Boolean = false,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
         val now = System.currentTimeMillis()
-        if (isExecuting || (now - lastExecutionTime < 2000L)) {
+        if (isExecuting || (now - lastExecutionTime < 1500L)) {
             return
         }
         coroutineScope.launch {
             isExecuting = true
             try {
-                val result = executeRoutine(context.applicationContext)
+                val result = executeRoutine(context.applicationContext, triggerAlarmOnSuccess)
                 lastExecutionTime = System.currentTimeMillis()
                 withContext(Dispatchers.Main) {
                     onComplete?.invoke(result)
@@ -65,6 +83,99 @@ object RescueEngine {
                 isExecuting = false
             }
         }
+    }
+
+    /**
+     * Auto-Restore Watchdog:
+     * If Developer Options, USB Debugging, or the Accessibility Service are switched off
+     * by the user, an OEM background killer, or a system timeout, this function
+     * automatically switches them back ON without overwriting other accessibility services.
+     */
+    suspend fun autoRestoreSettingsIfSwitchedOff(context: Context): Boolean = withContext(Dispatchers.IO) {
+        if (!hasWriteSecureSettingsPermission(context)) {
+            val fixCmd = getFixCommand(context)
+            RescueLogger.w("Auto-Watchdog: Missing WRITE_SECURE_SETTINGS.\nFix command for PC:\n$fixCmd")
+            return@withContext false
+        }
+
+        val cr = context.contentResolver
+        var restoredAny = false
+
+        // 1. Check & restore Developer Options
+        try {
+            val dev = Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)
+            if (dev != 1) {
+                Settings.Global.putInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 1)
+                RescueLogger.s("Auto-Watchdog: Developer Options was switched OFF! Automatically restored back to ON (1).")
+                restoredAny = true
+            }
+        } catch (e: Exception) {
+            RescueLogger.e("Auto-Watchdog Developer Options restore failed: ${e.message}")
+        }
+
+        // 2. Check & restore USB Debugging (ADB)
+        try {
+            val adb = Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0)
+            if (adb != 1) {
+                Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1)
+                RescueLogger.s("Auto-Watchdog: USB Debugging was switched OFF! Automatically restored back to ON (1).")
+                restoredAny = true
+            }
+        } catch (e: Exception) {
+            RescueLogger.e("Auto-Watchdog ADB restore failed: ${e.message}")
+        }
+
+        // 3. Check & restore Accessibility Service (PRESERVING other enabled services)
+        try {
+            val serviceComponent = ComponentName(context, RescueAccessibilityService::class.java)
+            val componentFlat = serviceComponent.flattenToString()
+            val componentShort = serviceComponent.flattenToShortString()
+
+            val rawServices = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+            val servicesList = rawServices.split(":")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toMutableList()
+
+            val isAlreadyEnabled = servicesList.any {
+                it.equals(componentFlat, ignoreCase = true) || it.equals(componentShort, ignoreCase = true)
+            }
+
+            if (!isAlreadyEnabled) {
+                servicesList.add(componentFlat)
+                val updated = servicesList.joinToString(":")
+                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, updated)
+                RescueLogger.s("Auto-Watchdog: Accessibility Service was switched OFF! Restored to ON while preserving ${servicesList.size - 1} other active accessibility service(s).")
+                restoredAny = true
+            }
+
+            val master = Settings.Secure.getInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+            if (master != 1) {
+                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                RescueLogger.s("Auto-Watchdog: Master ACCESSIBILITY_ENABLED was 0. Restored to 1.")
+                restoredAny = true
+            }
+        } catch (e: Exception) {
+            RescueLogger.e("Auto-Watchdog Accessibility restore failed: ${e.message}")
+        }
+
+        // 4. Check & restore ADB authorization timeout (Android 11+ / API 30+)
+        // Prevents Android from revoking "always allow" authorization after a few days
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val timeout = Settings.Global.getLong(cr, "adb_allowed_connection_time", -1L)
+                if (timeout != 0L) {
+                    Settings.Global.putLong(cr, "adb_allowed_connection_time", 0L)
+                    RescueLogger.s("Auto-Watchdog: ADB authorization timeout was reset. Automatically set back to 0 (Disabled) so 'always allow' never expires.")
+                    restoredAny = true
+                }
+            } catch (ignored: Throwable) {}
+        }
+
+        if (restoredAny) {
+            ConnectivityMonitor.refresh(context)
+        }
+        return@withContext restoredAny
     }
 
     fun simulateSuccessRoutine(context: Context) {
@@ -82,12 +193,16 @@ object RescueEngine {
             _stepStatus.value = _stepStatus.value.copy(step2AdbEnabled = true)
             delay(350)
 
-            RescueLogger.s("[TEST MODE] Step 3: Accessibility Auto-Allow Service = ACTIVE [VERIFIED]")
+            RescueLogger.s("[TEST MODE] Step 3: Accessibility Auto-Allow Service = ACTIVE [VERIFIED] (Other services preserved)")
             _stepStatus.value = _stepStatus.value.copy(step3AccessibilityEnabled = true)
             delay(350)
 
+            RescueLogger.s("[TEST MODE] Step 4: ADB authorization timeout disabled (0 ms). 'Always allow' will never expire.")
+            _stepStatus.value = _stepStatus.value.copy(isAdbTimeoutDisabled = true)
+            delay(350)
+
             RescueLogger.s("==================================================")
-            RescueLogger.s("[TEST MODE] ALL 3 SETTINGS VERIFIED OK!")
+            RescueLogger.s("[TEST MODE] ALL SETTINGS VERIFIED & ARMED!")
             RescueLogger.s("[TEST MODE] Triggering 10s Alarm Audio & 10s Vibration...")
             RescueLogger.s("==================================================")
 
@@ -112,7 +227,7 @@ object RescueEngine {
         HapticAndSoundFeedback.playDialogConfirmedFeedback(context)
     }
 
-    suspend fun executeRoutine(context: Context): Boolean = withContext(Dispatchers.IO) {
+    suspend fun executeRoutine(context: Context, triggerAlarmOnSuccess: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         val cr = context.contentResolver
         RescueLogger.init(context)
         _routineState.value = RoutineState.Running
@@ -122,13 +237,14 @@ object RescueEngine {
         RescueLogger.i("==================================================")
         RescueLogger.i("Executing zero-touch scrcpy preparation routine...")
         RescueLogger.i("Device Profile: ${profile.name} (${Build.MANUFACTURER} ${Build.MODEL})")
+        RescueLogger.i("Mode: ${if (triggerAlarmOnSuccess) "Computer USB Triggered (Alarm ON)" else "Silent Verification (Alarm OFF)"}")
         RescueLogger.i("==================================================")
 
         val hasPermission = hasWriteSecureSettingsPermission(context)
         RescueLogger.i("Permission android.permission.WRITE_SECURE_SETTINGS: ${if (hasPermission) "GRANTED" else "NOT GRANTED"}")
 
         if (!hasPermission) {
-            val grantCommand = "adb shell pm grant ${context.packageName} android.permission.WRITE_SECURE_SETTINGS"
+            val grantCommand = getFixCommand(context)
             val errMsg = "One-time setup required: WRITE_SECURE_SETTINGS is not yet granted.\nRun once via PC terminal:\n$grantCommand"
             RescueLogger.w(errMsg)
 
@@ -139,22 +255,24 @@ object RescueEngine {
 
             _stepStatus.value = _stepStatus.value.copy(
                 isRunning = false,
-                errorMessage = errMsg
+                errorMessage = errMsg,
+                fixCommand = grantCommand
             )
             _routineState.value = RoutineState.Error(
                 step = 0,
                 message = errMsg,
                 isPermissionMissing = true,
-                isAutoBlockerSuspected = isSamsung
+                isAutoBlockerSuspected = isSamsung,
+                fixCommand = grantCommand
             )
             ConnectivityMonitor.refresh(context)
             return@withContext false
         }
 
         // ---------------------------------------------------------
-        // STEP 1: Developer Options
+        // STEP 1: Developer Options (Touch ONLY if turned OFF)
         // ---------------------------------------------------------
-        RescueLogger.i("[Step 1/3] Checking Settings.Global.DEVELOPMENT_SETTINGS_ENABLED...")
+        RescueLogger.i("[Step 1/4] Checking Settings.Global.DEVELOPMENT_SETTINGS_ENABLED...")
         var devEnabled = try {
             Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)
         } catch (e: Exception) {
@@ -162,16 +280,16 @@ object RescueEngine {
         }
 
         if (devEnabled == 1) {
-            RescueLogger.i("Developer options already ENABLED (value = 1). Skipping write.")
-            _stepStatus.value = _stepStatus.value.copy(step1DevOptions = true)
+            RescueLogger.i("Developer options: Already TURNED ON (value = 1). Leaving untouched.")
+            _stepStatus.value = _stepStatus.value.copy(step1DevOptions = true, step1WasAlreadyOn = true)
         } else {
-            RescueLogger.i("Developer options currently OFF (value = $devEnabled). Enabling via putInt...")
+            RescueLogger.i("Developer options: Currently OFF (value = $devEnabled). Enabling only because it was turned off...")
             try {
                 val success = Settings.Global.putInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 1)
                 val verified = Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)
                 if (verified == 1) {
-                    RescueLogger.s("Developer options successfully enabled and verified! (write result = $success, verified = 1)")
-                    _stepStatus.value = _stepStatus.value.copy(step1DevOptions = true)
+                    RescueLogger.s("Developer options was OFF -> Successfully turned ON and verified! (write result = $success, verified = 1)")
+                    _stepStatus.value = _stepStatus.value.copy(step1DevOptions = true, step1WasAlreadyOn = false)
                 } else {
                     return@withContext handleStepFailure(context, 1, "Failed to verify DEVELOPMENT_SETTINGS_ENABLED (read back $verified).")
                 }
@@ -181,9 +299,9 @@ object RescueEngine {
         }
 
         // ---------------------------------------------------------
-        // STEP 2: USB Debugging (ADB_ENABLED)
+        // STEP 2: USB Debugging (ADB_ENABLED) (Touch ONLY if turned OFF)
         // ---------------------------------------------------------
-        RescueLogger.i("[Step 2/3] Checking Settings.Global.ADB_ENABLED...")
+        RescueLogger.i("[Step 2/4] Checking Settings.Global.ADB_ENABLED...")
         var adbEnabled = try {
             Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0)
         } catch (e: Exception) {
@@ -191,16 +309,16 @@ object RescueEngine {
         }
 
         if (adbEnabled == 1) {
-            RescueLogger.i("USB debugging already ENABLED (value = 1). Skipping write.")
-            _stepStatus.value = _stepStatus.value.copy(step2AdbEnabled = true)
+            RescueLogger.i("USB debugging: Already TURNED ON (value = 1). Leaving untouched.")
+            _stepStatus.value = _stepStatus.value.copy(step2AdbEnabled = true, step2WasAlreadyOn = true)
         } else {
-            RescueLogger.i("USB debugging currently OFF (value = $adbEnabled). Enabling via putInt...")
+            RescueLogger.i("USB debugging: Currently OFF (value = $adbEnabled). Enabling only because it was turned off...")
             try {
                 val success = Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1)
                 val verified = Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0)
                 if (verified == 1) {
-                    RescueLogger.s("USB debugging successfully enabled and verified! (write result = $success, verified = 1)")
-                    _stepStatus.value = _stepStatus.value.copy(step2AdbEnabled = true)
+                    RescueLogger.s("USB debugging was OFF -> Successfully turned ON and verified! (write result = $success, verified = 1)")
+                    _stepStatus.value = _stepStatus.value.copy(step2AdbEnabled = true, step2WasAlreadyOn = false)
                 } else {
                     return@withContext handleStepFailure(context, 2, "Failed to verify ADB_ENABLED (read back $verified).")
                 }
@@ -210,26 +328,32 @@ object RescueEngine {
         }
 
         // ---------------------------------------------------------
-        // STEP 3: Accessibility Service
+        // STEP 3: Accessibility Service (Preserving all other services)
         // ---------------------------------------------------------
-        RescueLogger.i("[Step 3/3] Checking Accessibility Service registration...")
+        RescueLogger.i("[Step 3/4] Checking Accessibility Service registration...")
         val serviceComponent = ComponentName(context, RescueAccessibilityService::class.java)
         val componentFlat = serviceComponent.flattenToString()
         val componentShort = serviceComponent.flattenToShortString()
 
         try {
-            val enabledServices = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-            val isServiceActive = enabledServices.split(":").map { it.trim() }.any {
+            val rawServices = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+            val currentList = rawServices.split(":")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toMutableList()
+
+            val isServiceActive = currentList.any {
                 it.equals(componentFlat, ignoreCase = true) || it.equals(componentShort, ignoreCase = true)
             }
 
             if (!isServiceActive) {
-                RescueLogger.i("Service not yet in ENABLED_ACCESSIBILITY_SERVICES. Appending '$componentFlat'...")
-                val updatedServices = if (enabledServices.isBlank()) componentFlat else "$enabledServices:$componentFlat"
+                RescueLogger.i("Service not yet in ENABLED_ACCESSIBILITY_SERVICES. Preserving ${currentList.size} existing service(s) and adding '$componentFlat'...")
+                currentList.add(componentFlat)
+                val updatedServices = currentList.joinToString(":")
                 val writeRes = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, updatedServices)
-                RescueLogger.i("Writing ENABLED_ACCESSIBILITY_SERVICES result: $writeRes")
+                RescueLogger.i("Writing ENABLED_ACCESSIBILITY_SERVICES result: $writeRes (Preserved other accessibility services)")
             } else {
-                RescueLogger.i("Service already present in ENABLED_ACCESSIBILITY_SERVICES.")
+                RescueLogger.i("Service already present in ENABLED_ACCESSIBILITY_SERVICES (${currentList.size} total services active).")
             }
 
             // Ensure master switch ACCESSIBILITY_ENABLED is 1
@@ -261,21 +385,49 @@ object RescueEngine {
         }
 
         // ---------------------------------------------------------
-        // STEP 4: All steps OK!
+        // STEP 4: Prevent "Always Allow" Expiration (Disable ADB timeout on Android 11+)
+        // ---------------------------------------------------------
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            RescueLogger.i("[Step 4/4] Configuring ADB authorization timeout (adb_allowed_connection_time)...")
+            try {
+                val currentTimeout = Settings.Global.getLong(cr, "adb_allowed_connection_time", -1L)
+                if (currentTimeout != 0L) {
+                    val putOk = Settings.Global.putLong(cr, "adb_allowed_connection_time", 0L)
+                    RescueLogger.s("Disabled ADB authorization timeout! 'Always allow from this computer' will never expire after a few days (putOk=$putOk).")
+                } else {
+                    RescueLogger.i("ADB authorization timeout is already disabled (0 ms). 'Always allow' will never expire.")
+                }
+                _stepStatus.value = _stepStatus.value.copy(isAdbTimeoutDisabled = true)
+            } catch (t: Throwable) {
+                RescueLogger.w("Could not write adb_allowed_connection_time: ${t.message}")
+            }
+        } else {
+            RescueLogger.i("[Step 4/4] Android version ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) uses permanent RSA keys by default without timeout.")
+            _stepStatus.value = _stepStatus.value.copy(isAdbTimeoutDisabled = true)
+        }
+
+        // ---------------------------------------------------------
+        // ALL STEPS OK
         // ---------------------------------------------------------
         RescueLogger.s("==================================================")
-        RescueLogger.s("ALL 3 SETTINGS VERIFIED OK!")
-        RescueLogger.s("Triggering 10s alarm audio and 10s vibration feedback...")
+        RescueLogger.s("ALL SETTINGS VERIFIED OK & PROTECTED BY AUTO-WATCHDOG!")
+        if (triggerAlarmOnSuccess) {
+            RescueLogger.s("COMPUTER USB CONNECTED: Triggering 10s alarm audio and 10s vibration feedback...")
+        } else {
+            RescueLogger.s("Silent check complete (Alarm will only sound when Computer USB is plugged in).")
+        }
         RescueLogger.s("==================================================")
 
         _stepStatus.value = _stepStatus.value.copy(
             isRunning = false,
-            step4AllOkAlarm = true
+            step4AllOkAlarm = triggerAlarmOnSuccess
         )
         _routineState.value = RoutineState.Success
 
-        // Play loud alarm and vibrate for 10 seconds
-        HapticAndSoundFeedback.playSuccessFeedback(context)
+        if (triggerAlarmOnSuccess) {
+            // Play loud alarm and vibrate for 10 seconds
+            HapticAndSoundFeedback.playSuccessFeedback(context)
+        }
 
         // Refresh live connectivity monitor with new ADB and settings state
         ConnectivityMonitor.refresh(context)
@@ -289,27 +441,31 @@ object RescueEngine {
     private fun handleStepFailure(context: Context, step: Int, message: String): Boolean {
         ConnectivityMonitor.refresh(context)
         val isSamsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+        val grantCmd = getFixCommand(context)
         val fullMsg = buildString {
             append("Step $step FAILED: $message\n")
             if (isSamsung) {
                 append("CRITICAL SAMSUNG NOTICE: One UI Auto Blocker actively blocks USB settings and commands!\n")
-                append("Disable Auto Blocker in: Settings > Security and privacy > Auto Blocker (toggle OFF).")
+                append("Disable Auto Blocker in: Settings > Security and privacy > Auto Blocker (toggle OFF).\n")
             }
+            append("Command to fix permission:\n$grantCmd")
         }
 
         RescueLogger.e(fullMsg)
         _stepStatus.value = _stepStatus.value.copy(
             isRunning = false,
-            errorMessage = fullMsg
+            errorMessage = fullMsg,
+            fixCommand = grantCmd
         )
         _routineState.value = RoutineState.Error(
             step = step,
             message = fullMsg,
             isPermissionMissing = false,
-            isAutoBlockerSuspected = isSamsung
+            isAutoBlockerSuspected = isSamsung,
+            fixCommand = grantCmd
         )
 
-        // Step 5: A step failed -> 3 short vibrations
+        // A step failed -> 3 short vibrations
         HapticAndSoundFeedback.playErrorFeedback(context)
         return false
     }

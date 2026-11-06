@@ -26,31 +26,90 @@ object RescueLogger {
 
     private const val TAG = "ScrcpyRescue"
     private const val LOG_FILE_NAME = "scrcpy_rescue.log"
+    private const val MAX_LOG_SIZE_BYTES = 512 * 1024L // 512 KB max before gentle rotation
+
     private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val fullDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    private var logFile: File? = null
+    // Primary safe log file in Device Protected (DE) storage - available even before phone unlock
+    private var primarySafeFile: File? = null
+
+    // Mirror log file in External Files directory - easy for PC to pull via ADB or MTP
+    private var externalMirrorFile: File? = null
+
+    private var cachedContext: Context? = null
 
     @Synchronized
     fun init(context: Context) {
-        if (logFile == null) {
-            logFile = File(context.filesDir, LOG_FILE_NAME)
-            val isNewFile = !logFile!!.exists()
-            if (isNewFile) {
+        cachedContext = context.applicationContext
+
+        // 1. Setup Primary Safe Log File (Device-Protected Storage: survives reboots & works before unlock)
+        if (primarySafeFile == null) {
+            val safeContext = StorageHelper.getSafeContext(context)
+            val dir = safeContext.filesDir
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            primarySafeFile = File(dir, LOG_FILE_NAME)
+
+            // Check if legacy log exists in credential-encrypted storage to migrate
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !primarySafeFile!!.exists()) {
+                try {
+                    val legacyFile = File(context.filesDir, LOG_FILE_NAME)
+                    if (legacyFile.exists()) {
+                        legacyFile.copyTo(primarySafeFile!!, overwrite = true)
+                        legacyFile.delete()
+                    }
+                } catch (ignored: Throwable) {}
+            }
+
+            val isNew = !primarySafeFile!!.exists() || primarySafeFile!!.length() == 0L
+            if (isNew) {
                 logHeader()
             }
+        }
+
+        // 2. Setup External Mirror Log File (for PC adb pull)
+        checkAndSyncExternalMirror(context)
+    }
+
+    private fun checkAndSyncExternalMirror(context: Context) {
+        try {
+            val extDir = context.getExternalFilesDir(null)
+            if (extDir != null) {
+                if (!extDir.exists()) {
+                    extDir.mkdirs()
+                }
+                externalMirrorFile = File(extDir, LOG_FILE_NAME)
+
+                // If primary file has content and mirror is missing or smaller, sync up
+                val primary = primarySafeFile
+                if (primary != null && primary.exists()) {
+                    val mirror = externalMirrorFile!!
+                    if (!mirror.exists() || mirror.length() < primary.length()) {
+                        try {
+                            primary.copyTo(mirror, overwrite = true)
+                        } catch (ignored: Throwable) {}
+                    }
+                }
+            }
+        } catch (ignored: Throwable) {
+            // In Direct Boot before unlock, external storage may be unavailable
         }
     }
 
     private fun logHeader() {
         val header = buildString {
             appendLine("==================================================")
-            appendLine("Scrcpy Rescue - Session Initialized: ${fullDateFormat.format(Date())}")
+            appendLine("Windows Android - Session Initialized: ${fullDateFormat.format(Date())}")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.PRODUCT})")
             appendLine("Android Version: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            appendLine("Storage Mode: Device-Protected Storage (Direct Boot Safe)")
+            appendLine("Network: Offline Only (No Internet/Network Server)")
+            appendLine("Backup: Disabled (Protected Local Storage)")
             appendLine("Fingerprint: ${Build.FINGERPRINT}")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 appendLine("Security Patch: ${Build.VERSION.SECURITY_PATCH}")
@@ -80,7 +139,7 @@ object RescueLogger {
         } catch (ignored: Throwable) {}
 
         val updated = _logs.value + entry
-        // Keep in-memory buffer at most 500 lines
+        // Keep in-memory buffer at most 500 lines for smooth UI rendering
         _logs.value = if (updated.size > 500) updated.takeLast(500) else updated
 
         appendToFile("[$time] [${level.name}] $message\n")
@@ -92,22 +151,67 @@ object RescueLogger {
     fun e(msg: String) = log(LogLevel.ERROR, msg)
 
     private fun appendToFile(text: String) {
-        logFile?.let { file ->
+        // Rotate if primary log file exceeds limit
+        rotateLogFileIfNecessary()
+
+        // 1. Write to Primary Safe Log File (Device-Protected Storage)
+        primarySafeFile?.let { file ->
             try {
                 FileWriter(file, true).use { writer ->
                     writer.write(text)
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "Failed writing to log file: ${t.message}")
+                Log.e(TAG, "Failed writing to primary safe log file: ${t.message}")
+            }
+        }
+
+        // 2. Write to External Mirror Log File if accessible (for easy PC pulling)
+        cachedContext?.let { ctx ->
+            if (externalMirrorFile == null) {
+                checkAndSyncExternalMirror(ctx)
+            }
+        }
+
+        externalMirrorFile?.let { mirror ->
+            try {
+                FileWriter(mirror, true).use { writer ->
+                    writer.write(text)
+                }
+            } catch (ignored: Throwable) {
+                // If external storage is not yet mounted (Direct Boot mode), ignore mirror write
             }
         }
     }
 
-    fun getLogFile(): File? = logFile
+    private fun rotateLogFileIfNecessary() {
+        val file = primarySafeFile ?: return
+        if (file.exists() && file.length() > MAX_LOG_SIZE_BYTES) {
+            try {
+                val lines = file.readLines()
+                val keepLines = lines.takeLast(2000)
+                file.writeText("[LOG ROTATED: Preserving latest 2000 entries]\n" + keepLines.joinToString("\n") + "\n")
+                externalMirrorFile?.let { mirror ->
+                    try {
+                        file.copyTo(mirror, overwrite = true)
+                    } catch (ignored: Throwable) {}
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Log rotation failed: ${t.message}")
+            }
+        }
+    }
+
+    fun getLogFile(): File? = primarySafeFile ?: externalMirrorFile
+
+    fun getPrimarySafeLogFile(): File? = primarySafeFile
+
+    fun getExternalMirrorLogFile(): File? = externalMirrorFile
 
     fun readLogFileText(): String {
         return try {
-            logFile?.readText() ?: "No log file available"
+            primarySafeFile?.readText()
+                ?: externalMirrorFile?.readText()
+                ?: "No log file available"
         } catch (e: Exception) {
             "Error reading log file: ${e.message}"
         }
@@ -116,8 +220,26 @@ object RescueLogger {
     fun clear() {
         _logs.value = emptyList()
         try {
-            logFile?.delete()
+            primarySafeFile?.delete()
+            externalMirrorFile?.delete()
             logHeader()
         } catch (ignored: Exception) {}
+    }
+
+    /**
+     * Returns clear instructions and ADB commands for pulling and reading the log from a PC.
+     */
+    fun getPcPullCommands(context: Context): String {
+        val pkg = context.packageName
+        return buildString {
+            appendLine("# Option 1: Pull from external storage (Recommended when unlocked):")
+            appendLine("adb pull /sdcard/Android/data/$pkg/files/$LOG_FILE_NAME ./scrcpy_rescue.log")
+            appendLine()
+            appendLine("# Option 2: Pull even before phone is unlocked (Direct Boot mode):")
+            appendLine("adb exec-out run-as $pkg cat files/$LOG_FILE_NAME > scrcpy_rescue.log")
+            appendLine()
+            appendLine("# Option 3: View directly in terminal in real time:")
+            appendLine("adb exec-out run-as $pkg tail -f files/$LOG_FILE_NAME")
+        }
     }
 }

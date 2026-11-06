@@ -19,6 +19,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
@@ -135,17 +137,58 @@ class MainActivity : ComponentActivity() {
             RescueLogger.w("Connectivity monitor initialization: ${t.message}")
         }
 
-        // 1. Initialize Alarm Sound & immediately maximize alarm volume (preserving original to restore on exit)
+        // 1. Initialize Alarm Sound with crash recovery (restores original volume if previous session crashed)
         try {
             AlarmSoundManager.init(this)
-            AlarmSoundManager.maxOutAlarmVolume(this)
         } catch (t: Throwable) {
             RescueLogger.w("Volume initialization: ${t.message}")
         }
 
-        // 2. Keep the screen awake during the process
+        // 2. Configure screen display flags for lock-screen recovery
+        configureWindowScreenWake()
+
+        // 3. Start foreground monitor service safely
         try {
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            RescueForegroundService.startService(this)
+        } catch (t: Throwable) {
+            RescueLogger.w("Could not start foreground service: ${t.message}")
+        }
+
+        // 4. AUTO-START: Execute the zero-touch preparation routine silently on launch (Alarm only sounds on PC USB connection)
+        try {
+            RescueEngine.executeRoutineAsync(this, triggerAlarmOnSuccess = false)
+        } catch (t: Throwable) {
+            RescueLogger.e("Initial routine trigger error: ${t.message}")
+        }
+
+        setContent {
+            MyApplicationTheme(darkTheme = true) {
+                RescueMainScreen(
+                    onRerunRoutine = { RescueEngine.executeRoutineAsync(this, triggerAlarmOnSuccess = true) },
+                    onSimulateSuccess = { RescueEngine.simulateSuccessRoutine(this) },
+                    onSimulateDialog = { RescueEngine.simulateDialogDetected(this) },
+                    onRequestBatteryOptimization = { requestIgnoreBatteryOptimization() },
+                    onTestSensoryFeedback = { HapticAndSoundFeedback.playSuccessFeedback(this) },
+                    onStopSound = { HapticAndSoundFeedback.stopAudio() },
+                    onCopyGrantCommand = { copyGrantCommandToClipboard() },
+                    onCopyPcPullCommand = { copyPcPullCommandToClipboard() },
+                    onCopyDirectBootCommand = { copyDirectBootCommandToClipboard() },
+                    onShareLog = { shareLogFile() }
+                )
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        configureWindowScreenWake()
+        ConnectivityMonitor.refresh(this)
+        RescueLogger.i("MainActivity onNewIntent() received: Screen awakened for PC connection.")
+    }
+
+    private fun configureWindowScreenWake() {
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 setShowWhenLocked(true)
                 setTurnScreenOn(true)
@@ -160,47 +203,19 @@ class MainActivity : ComponentActivity() {
         } catch (t: Throwable) {
             RescueLogger.w("Screen flag setup: ${t.message}")
         }
-
-        // 3. Start foreground monitor service safely
-        try {
-            RescueForegroundService.startService(this)
-        } catch (t: Throwable) {
-            RescueLogger.w("Could not start foreground service: ${t.message}")
-        }
-
-        // 4. AUTO-START: Immediately execute the zero-touch preparation routine on launch (no button presses needed)
-        try {
-            RescueEngine.executeRoutineAsync(this)
-        } catch (t: Throwable) {
-            RescueLogger.e("Initial routine trigger error: ${t.message}")
-        }
-
-        setContent {
-            MyApplicationTheme(darkTheme = true) {
-                RescueMainScreen(
-                    onRerunRoutine = { RescueEngine.executeRoutineAsync(this) },
-                    onSimulateSuccess = { RescueEngine.simulateSuccessRoutine(this) },
-                    onSimulateDialog = { RescueEngine.simulateDialogDetected(this) },
-                    onRequestBatteryOptimization = { requestIgnoreBatteryOptimization() },
-                    onTestSensoryFeedback = { HapticAndSoundFeedback.playSuccessFeedback(this) },
-                    onStopSound = { HapticAndSoundFeedback.stopAudio() },
-                    onCopyGrantCommand = { copyGrantCommandToClipboard() },
-                    onShareLog = { shareLogFile() }
-                )
-            }
-        }
     }
 
     override fun onResume() {
         super.onResume()
-        // Ensure volume is maximized while app is in foreground
-        AlarmSoundManager.maxOutAlarmVolume(this)
+        configureWindowScreenWake()
         // Refresh live connectivity and USB debugging status
         ConnectivityMonitor.refresh(this)
     }
 
     override fun onStop() {
         super.onStop()
+        // Ensure screen keep-awake is released when the app is no longer open
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // Stop any active alarm audio and restore the original volume as it was prior to opening
         HapticAndSoundFeedback.stopAudio()
         AlarmSoundManager.restoreAlarmVolume(this)
@@ -208,6 +223,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         HapticAndSoundFeedback.stopAudio()
         AlarmSoundManager.restoreAlarmVolume(this)
         ConnectivityMonitor.stopMonitoring()
@@ -220,6 +236,22 @@ class MainActivity : ComponentActivity() {
         val clip = ClipData.newPlainText("ADB Grant Command", command)
         clipboard.setPrimaryClip(clip)
         Toast.makeText(this, "Copied ADB grant command to clipboard!", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyPcPullCommandToClipboard() {
+        val command = "adb pull /sdcard/Android/data/$packageName/files/scrcpy_rescue.log ./scrcpy_rescue.log"
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText("PC Log Pull Command", command)
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, "Copied PC adb pull command to clipboard!", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyDirectBootCommandToClipboard() {
+        val command = "adb exec-out run-as $packageName cat files/scrcpy_rescue.log > scrcpy_rescue.log"
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText("Direct Boot Log Command", command)
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, "Copied Direct Boot adb command to clipboard!", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestIgnoreBatteryOptimization() {
@@ -267,6 +299,8 @@ fun RescueMainScreen(
     onTestSensoryFeedback: () -> Unit,
     onStopSound: () -> Unit,
     onCopyGrantCommand: () -> Unit,
+    onCopyPcPullCommand: () -> Unit,
+    onCopyDirectBootCommand: () -> Unit,
     onShareLog: () -> Unit
 ) {
     val context = LocalContext.current
@@ -281,6 +315,7 @@ fun RescueMainScreen(
     val volumeStatus by AlarmSoundManager.volumeStatus.collectAsState()
     val connectivityState by ConnectivityMonitor.state.collectAsState()
     var showWizardModal by remember { mutableStateOf(false) }
+    var wizardInitialTab by remember { mutableStateOf(0) }
 
     val profile = remember { DeviceProfileResolver.resolve() }
 
@@ -303,6 +338,18 @@ fun RescueMainScreen(
     }
 
     val scrollState = rememberScrollState()
+
+    // Screen stays on while plugged into PC when the app is open
+    val activity = context as? Activity
+    LaunchedEffect(connectivityState.isComputerUsb) {
+        if (connectivityState.isComputerUsb) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            RescueLogger.i("Screen stay-awake ACTIVE: Connected to PC USB while app is open.")
+        } else {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            RescueLogger.i("Screen stay-awake RELEASED: Disconnected from PC USB.")
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -371,17 +418,21 @@ fun RescueMainScreen(
                 .verticalScroll(scrollState)
                 .padding(horizontal = 14.dp, vertical = 6.dp)
         ) {
-            // 1. Live Connectivity & USB Debugging Dashboard (Prominent card at the top)
+            // 1. Live Connectivity Dashboard
             ConnectivityDashboardCard(
                 connectivityState = connectivityState,
-                onRefresh = { ConnectivityMonitor.refresh(context) }
+                onRefresh = { ConnectivityMonitor.refresh(context) },
+                onRequestBatteryOptimization = onRequestBatteryOptimization
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 2. Setup Wizard & Auto Permission Guide Shortcut Button
+            // 2. Setup Wizard & Guide Shortcut
             OutlinedButton(
-                onClick = { showWizardModal = true },
+                onClick = {
+                    wizardInitialTab = 0
+                    showWizardModal = true
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(38.dp)
@@ -405,7 +456,7 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 3. Overall Status Banner
+            // 3. Status Banner
             StatusBanner(
                 routineState = routineState,
                 stepStatus = stepStatus,
@@ -416,7 +467,7 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 4. Alarm Sound & Auto Volume Card
+            // 4. Alarm Sound & Volume Controls
             AlarmConfigCard(
                 currentSoundTitle = currentSoundTitle,
                 volumeStatus = volumeStatus,
@@ -442,7 +493,7 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 5. Steps Status Card
+            // 5. Automation Steps Status Card
             StepsCard(
                 stepStatus = stepStatus,
                 isAccessibilityConnected = isAccessibilityConnected,
@@ -452,7 +503,17 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 6. Device & OEM Profile Card
+            // 6. Permission Durability & Auto-Restore Card
+            PermissionDurabilityCard(
+                onOpenFaqGuide = {
+                    wizardInitialTab = 1
+                    showWizardModal = true
+                }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 7. Device & OEM Profile Card
             DeviceProfileCard(
                 profile = profile,
                 onRequestBatteryOptimization = onRequestBatteryOptimization
@@ -460,7 +521,7 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 7. Interactive Action Buttons Row
+            // 8. Action Buttons Row (Run Routine, Demo All OK, Simulate Dialog)
             ActionButtonsRow(
                 onRerunRoutine = onRerunRoutine,
                 onSimulateSuccess = onSimulateSuccess,
@@ -469,12 +530,20 @@ fun RescueMainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 8. Terminal Log Viewer (Scrollable execution log with testTag)
+            // 9. Live Execution Terminal Log Viewer
             TerminalLogViewer(
                 logs = logs,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(200.dp)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 10. PC Log Access & Direct Boot Retrieval Card
+            PcLogAccessCard(
+                onCopyPullCommand = onCopyPcPullCommand,
+                onCopyDirectBootCommand = onCopyDirectBootCommand
             )
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -487,7 +556,8 @@ fun RescueMainScreen(
                 onRerunRoutine = {
                     showWizardModal = false
                     onRerunRoutine()
-                }
+                },
+                initialTab = wizardInitialTab
             )
         }
     }
@@ -496,7 +566,8 @@ fun RescueMainScreen(
 @Composable
 fun ConnectivityDashboardCard(
     connectivityState: ConnectivityState,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onRequestBatteryOptimization: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier
@@ -555,13 +626,27 @@ fun ConnectivityDashboardCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val usbValue = when {
+                    connectivityState.isComputerUsb -> "PC CONNECTED"
+                    connectivityState.isWallCharger -> "WALL CHARGER"
+                    connectivityState.isUsbConnected -> "USB DETECTED"
+                    else -> "UNPLUGGED"
+                }
+
+                val usbSub = when {
+                    connectivityState.isComputerUsb -> "Host PC USB link (Alarm active)"
+                    connectivityState.isWallCharger -> "AC wall adapter (Alarm silenced)"
+                    connectivityState.isUsbConnected -> "USB cable detected"
+                    else -> "Plug into computer USB"
+                }
+
                 ConnectivityMetricTile(
                     modifier = Modifier.weight(1f),
                     title = "USB Physical Link",
-                    value = if (connectivityState.isUsbConnected) "CONNECTED" else "UNPLUGGED",
-                    subtitle = if (connectivityState.isUsbConnected) "PC cable detected" else "Plug in USB cable",
+                    value = usbValue,
+                    subtitle = usbSub,
                     icon = Icons.Default.Usb,
-                    isActive = connectivityState.isUsbConnected,
+                    isActive = connectivityState.isComputerUsb,
                     activeColor = SuccessGreen
                 )
 
@@ -569,7 +654,7 @@ fun ConnectivityDashboardCard(
                     modifier = Modifier.weight(1f),
                     title = "USB Debugging",
                     value = if (connectivityState.isAdbEnabled) "ENABLED (1)" else "DISABLED (0)",
-                    subtitle = if (connectivityState.isAdbEnabled) "ADB daemon active" else "Routine will enable",
+                    subtitle = if (connectivityState.isAdbEnabled) "Untouched if was ON" else "Routine enables if OFF",
                     icon = Icons.Default.BugReport,
                     isActive = connectivityState.isAdbEnabled,
                     activeColor = SuccessGreen
@@ -595,7 +680,7 @@ fun ConnectivityDashboardCard(
                     subtitle = powerDetail,
                     icon = if (connectivityState.isPowerConnected) Icons.Default.Bolt else Icons.Default.Power,
                     isActive = connectivityState.isPowerConnected,
-                    activeColor = RescueCyan
+                    activeColor = if (connectivityState.isComputerUsb) SuccessGreen else RescueCyan
                 )
 
                 ConnectivityMetricTile(
@@ -614,7 +699,11 @@ fun ConnectivityDashboardCard(
             // Live status guidance banner
             Surface(
                 shape = RoundedCornerShape(6.dp),
-                color = if (connectivityState.isUsbConnected && connectivityState.isAdbEnabled) SuccessGreenBg else Color(0xFF0F172A),
+                color = when {
+                    connectivityState.isComputerUsb && connectivityState.isAdbEnabled -> SuccessGreenBg
+                    connectivityState.isWallCharger -> Color(0xFF1E293B)
+                    else -> Color(0xFF0F172A)
+                },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -622,24 +711,104 @@ fun ConnectivityDashboardCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = if (connectivityState.isUsbConnected && connectivityState.isAdbEnabled) Icons.Default.CheckCircle else Icons.Default.Info,
+                        imageVector = when {
+                            connectivityState.isComputerUsb && connectivityState.isAdbEnabled -> Icons.Default.CheckCircle
+                            connectivityState.isWallCharger -> Icons.Default.Power
+                            else -> Icons.Default.Info
+                        },
                         contentDescription = null,
-                        tint = if (connectivityState.isUsbConnected && connectivityState.isAdbEnabled) SuccessGreen else WarningAmber,
+                        tint = when {
+                            connectivityState.isComputerUsb && connectivityState.isAdbEnabled -> SuccessGreen
+                            connectivityState.isWallCharger -> RescueCyan
+                            else -> WarningAmber
+                        },
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (connectivityState.isUsbConnected && connectivityState.isAdbEnabled) {
-                            "Ready for scrcpy wired mirroring! Run watchdog script on PC."
-                        } else if (!connectivityState.isUsbConnected) {
-                            "Plug in USB cable connected to your PC to start mirroring."
-                        } else {
-                            "USB connected. Verifying and activating ADB bridge..."
+                        text = when {
+                            connectivityState.isPcFastCharging && connectivityState.isAdbEnabled ->
+                                "Connected to PC Fast-Charge Port (Host Enumerated & ADB Ready)! Wall charger filter passed."
+                            connectivityState.isComputerUsb && connectivityState.isAdbEnabled ->
+                                "Connected to Computer USB & ADB is ready for scrcpy wired mirroring!"
+                            connectivityState.isComputerUsb ->
+                                "Verified PC Host connected! Screen keep-awake active."
+                            connectivityState.isWallCharger ->
+                                "Connected to AC Wall Charger / Power Bank. Rescue alarm is silenced; only fires on Computer USB."
+                            !connectivityState.isUsbConnected ->
+                                "Ready: Plug phone into computer USB port. Wall chargers are ignored."
+                            else ->
+                                "USB link active. Verifying host computer enumeration..."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         fontSize = 11.sp,
-                        color = if (connectivityState.isUsbConnected && connectivityState.isAdbEnabled) Color(0xFFD1FAE5) else Color(0xFFCBD5E1)
+                        color = when {
+                            connectivityState.isComputerUsb && connectivityState.isAdbEnabled -> Color(0xFFD1FAE5)
+                            connectivityState.isWallCharger -> Color(0xFFE2E8F0)
+                            else -> Color(0xFFCBD5E1)
+                        }
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Battery Saver Exemption Banner (Step 4 Background Immunity)
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = if (connectivityState.isBatteryOptimizationIgnored) Color(0xFF064E3B).copy(alpha = 0.45f) else Color(0xFF78350F).copy(alpha = 0.45f),
+                border = androidx.compose.foundation.BorderStroke(
+                    0.5.dp,
+                    if (connectivityState.isBatteryOptimizationIgnored) SuccessGreen.copy(alpha = 0.4f) else WarningAmber.copy(alpha = 0.5f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { onRequestBatteryOptimization() }
+                    .testTag("banner_battery_optimization")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (connectivityState.isBatteryOptimizationIgnored) Icons.Default.CheckCircle else Icons.Default.BatteryChargingFull,
+                            contentDescription = null,
+                            tint = if (connectivityState.isBatteryOptimizationIgnored) SuccessGreen else WarningAmber,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (connectivityState.isBatteryOptimizationIgnored)
+                                "Battery Saver: Exempted • Protected from Background Killers"
+                            else
+                                "Battery Saver: Active (May sleep) • Tap to Exempt for 24/7 Watchdog",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (connectivityState.isBatteryOptimizationIgnored) Color(0xFFA7F3D0) else Color(0xFFFDE68A)
+                        )
+                    }
+                    if (!connectivityState.isBatteryOptimizationIgnored) {
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = WarningAmber
+                        ) {
+                            Text(
+                                text = "EXEMPT",
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Black
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -746,7 +915,7 @@ fun AlarmConfigCard(
                     color = Color(0xFF1E3A8A)
                 ) {
                     Text(
-                        text = "Auto-Max on Open",
+                        text = "PC USB Alarm Only",
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF93C5FD),
@@ -771,10 +940,16 @@ fun AlarmConfigCard(
                         fontSize = 12.5.sp
                     )
                     Text(
-                        text = "$volumeStatus • Restores on Exit",
+                        text = "$volumeStatus • Crash-Proof Restore Active",
                         style = MaterialTheme.typography.bodySmall,
                         color = SuccessGreen,
                         fontSize = 11.sp
+                    )
+                    Text(
+                        text = "Smart PC Latch: Fires once per PC connection • Suppressed on app restart • Wall chargers ignored",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8),
+                        fontSize = 10.5.sp
                     )
                 }
             }
@@ -932,7 +1107,7 @@ fun StatusBanner(
 
                 Text(
                     text = when (routineState) {
-                        is RoutineState.Success -> if (isConfirmed) "Scrcpy Ready (Dialog Confirmed!)" else "All Settings OK - Plug in USB Cable"
+                        is RoutineState.Success -> if (isConfirmed) "Scrcpy Ready (Dialog Confirmed!)" else "All Settings OK - Plug in PC USB"
                         is RoutineState.Error -> if (routineState.isPermissionMissing) "Permission Setup Required" else "Step ${routineState.step} Failed"
                         is RoutineState.Running -> "Configuring Zero-Touch Bridge..."
                         is RoutineState.Idle -> "Standby - Ready to Connect"
@@ -951,7 +1126,32 @@ fun StatusBanner(
                     color = Color(0xFFFFD1D1)
                 )
 
-                if (routineState.isPermissionMissing) {
+                val fixCmd = routineState.fixCommand ?: "adb shell pm grant com.aistudio.windowsandroid.uqdvkf android.permission.WRITE_SECURE_SETTINGS"
+
+                if (routineState.isPermissionMissing || fixCmd.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = Color(0xFF450A0A),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ErrorRed)
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Text(
+                                text = "COMMAND TO FIX PERMISSION (RUN ON PC VIA ADB):",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFCA5A5)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = fixCmd,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(6.dp))
                     Button(
                         onClick = onCopyGrantCommand,
@@ -967,7 +1167,7 @@ fun StatusBanner(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Copy ADB Grant Command",
+                            text = "Copy Fix Command",
                             color = Color.Black,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
@@ -978,11 +1178,13 @@ fun StatusBanner(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = if (isScanning) {
-                        "USB Debugging enabled. Scanning for 'Allow USB debugging?' dialog (60s)..."
+                        "USB Debugging verified. Scanning for 'Allow USB debugging?' dialog (60s)..."
                     } else if (isConfirmed) {
                         "Auto-allow confirmed! Launch scrcpy from your PC."
+                    } else if (stepStatus.step4AllOkAlarm) {
+                        "Developer options & ADB verified. 10s Alarm played for PC USB!"
                     } else {
-                        "Developer options & ADB enabled. Alarm and vibration played."
+                        "Developer options & ADB verified (untouched if was ON). Plug phone into computer USB port for rescue alarm."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFFD1FAE5)
@@ -1017,32 +1219,60 @@ fun StepsCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
+            val devSub = when {
+                stepStatus.step1WasAlreadyOn -> "Already ON • Left untouched (Only turned on if OFF)"
+                stepStatus.step1DevOptions -> "Was OFF • Successfully Turned ON"
+                else -> "Settings.Global.DEVELOPMENT_SETTINGS_ENABLED"
+            }
+            val devBadge = if (stepStatus.step1WasAlreadyOn) "UNTOUCHED" else if (stepStatus.step1DevOptions) "VERIFIED" else "PENDING"
+
             StepRowItem(
                 stepNum = 1,
                 title = "Developer Options",
-                subText = "Settings.Global.DEVELOPMENT_SETTINGS_ENABLED",
-                isDone = stepStatus.step1DevOptions
+                subText = devSub,
+                isDone = stepStatus.step1DevOptions,
+                badgeText = devBadge,
+                badgeColor = if (stepStatus.step1WasAlreadyOn) RescueCyan else null
             )
+
+            val adbSub = when {
+                stepStatus.step2WasAlreadyOn -> "Already ON • Left untouched (Only turned on if OFF)"
+                stepStatus.step2AdbEnabled -> "Was OFF • Successfully Turned ON"
+                else -> "Settings.Global.ADB_ENABLED"
+            }
+            val adbBadge = if (stepStatus.step2WasAlreadyOn) "UNTOUCHED" else if (stepStatus.step2AdbEnabled) "VERIFIED" else "PENDING"
 
             StepRowItem(
                 stepNum = 2,
                 title = "USB Debugging",
-                subText = "Settings.Global.ADB_ENABLED",
-                isDone = stepStatus.step2AdbEnabled
+                subText = adbSub,
+                isDone = stepStatus.step2AdbEnabled,
+                badgeText = adbBadge,
+                badgeColor = if (stepStatus.step2WasAlreadyOn) RescueCyan else null
             )
 
             StepRowItem(
                 stepNum = 3,
                 title = "Accessibility Auto-Allow",
-                subText = if (isAccessibilityConnected) "Service Connected & Active" else "Writing Settings.Secure...",
-                isDone = stepStatus.step3AccessibilityEnabled || isAccessibilityConnected
+                subText = if (isAccessibilityConnected) "Service Connected • Preserves other services & auto-heals" else "Preserves existing services • Writing Settings.Secure...",
+                isDone = stepStatus.step3AccessibilityEnabled || isAccessibilityConnected,
+                badgeText = if (stepStatus.step3AccessibilityEnabled || isAccessibilityConnected) "ACTIVE" else "PENDING"
             )
 
             StepRowItem(
                 stepNum = 4,
+                title = "'Always Allow' Immunity",
+                subText = "Timeout disabled (0 ms) • PC authorization never expires after a few days",
+                isDone = stepStatus.isAdbTimeoutDisabled,
+                badgeText = if (stepStatus.isAdbTimeoutDisabled) "PERMANENT" else "ARMED"
+            )
+
+            StepRowItem(
+                stepNum = 5,
                 title = "Sensory Feedback",
-                subText = "10s Alarm Audio + Vibration (USAGE_ALARM)",
-                isDone = stepStatus.step4AllOkAlarm
+                subText = "10s Alarm Audio + Vibration (PC USB connection only)",
+                isDone = stepStatus.step4AllOkAlarm,
+                badgeText = if (stepStatus.step4AllOkAlarm) "PLAYED" else "ARMED"
             )
         }
     }
@@ -1053,7 +1283,9 @@ fun StepRowItem(
     stepNum: Int,
     title: String,
     subText: String,
-    isDone: Boolean
+    isDone: Boolean,
+    badgeText: String? = null,
+    badgeColor: Color? = null
 ) {
     Row(
         modifier = Modifier
@@ -1103,11 +1335,241 @@ fun StepRowItem(
         }
 
         Text(
-            text = if (isDone) "VERIFIED" else "PENDING",
+            text = badgeText ?: (if (isDone) "VERIFIED" else "PENDING"),
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
-            color = if (isDone) SuccessGreen else Color(0xFF94A3B8)
+            color = badgeColor ?: (if (isDone) SuccessGreen else Color(0xFF94A3B8))
         )
+    }
+}
+
+@Composable
+fun PermissionDurabilityCard(
+    onOpenFaqGuide: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("permission_durability_card"),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = RescueSurfaceDark),
+        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCardBorder))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = SuccessGreen,
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "PERMISSION DURABILITY & AUTO-RESTORE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = SuccessGreenBg
+                ) {
+                    Text(
+                        text = "PERMANENT ACCESS",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = SuccessGreen,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            DurabilityItem(
+                title = "Auto-Restore Watchdog (Switched OFF Immunity)",
+                status = "Auto-Reactivates in <500ms",
+                desc = "If Developer Options, USB Debugging, or Accessibility get switched off by the user or an aggressive OEM process, real-time observers immediately turn them back ON.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "'Always Allow' ADB Timeout Immunity",
+                status = "Timeout Disabled (0 ms)",
+                desc = "Android revokes 'Always allow' for PCs after a few days by default. The app forces adb_allowed_connection_time to 0, so your computer stays permanently authorized forever.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Non-Destructive Accessibility Ingestion",
+                status = "Preserves All Other Services",
+                desc = "The auto-allow service parses existing enabled accessibility services and injects itself into the set without overwriting TalkBack or other accessibility tools.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Smart PC Screen Stay-Awake",
+                status = "PC USB Connected Only",
+                desc = "The screen stays awake indefinitely when plugged into a PC while Windows Android is open. Wall chargers and disconnected states allow normal sleep.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Phone Reboots & Direct Boot (Pre-Unlock)",
+                status = "Device-Protected Storage (DE)",
+                desc = "Settings and logs are saved in Device-Protected Storage. BootReceiver listens to LOCKED_BOOT_COMPLETED, keeping rescue armed even before you unlock the phone.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Zero-Network Security & No-Backup",
+                status = "Offline Only • Backup Disabled",
+                desc = "INTERNET and network access are permanently removed. Full backup and cloud extraction are disabled so settings and logs remain strictly local and private.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Trustworthy PC Host Hardware Filter",
+                status = "USB Enumeration State Verified",
+                desc = "Inspects kernel USB gadget descriptor configuration to differentiate PC USB-PD / CDP ports from AC wall chargers. Wall chargers are strictly ignored.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Crash-Proof Original Volume Restoration",
+                status = "DE Storage Backed • Crash Handlers Active",
+                desc = "Original alarm volume is committed to Device-Protected storage before being maxed. Global UncaughtExceptionHandlers and startup crash recovery guarantee your volume is always restored.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Non-Repeating Smart PC Alarm Latch",
+                status = "Fires Once Per Plug-In • Suppressed on Restart",
+                desc = "Alarm sounds exactly once when plugged into a PC. It will never repeat over and over while connected, and will not play when the app or phone restarts.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "PC Connection Screen Wake (Android 10–16)",
+                status = "Hardware WakeLock & Full-Screen Intent",
+                desc = "When a PC is connected, the app engages SCREEN_BRIGHT_WAKE_LOCK with ACQUIRE_CAUSES_WAKEUP and dispatches a full-screen alert, turning on the display over the keyguard.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Battery Optimization & Killer Immunity",
+                status = "START_STICKY • Recents Auto-Respawn",
+                desc = "The foreground service runs with high process priority, handles onTaskRemoved() by scheduling immediate AlarmManager resurrection, and prompts for battery optimization exemption.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            DurabilityItem(
+                title = "Direct Boot Pre-Unlock Auto-Start",
+                status = "LOCKED_BOOT_COMPLETED • DE Storage",
+                desc = "Starts automatically upon device reboot before PIN/pattern unlock. Operates fully in Device-Protected storage so recovery is armed even after unexpected reboots.",
+                isPositive = true
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = onOpenFaqGuide,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(34.dp)
+                    .testTag("btn_read_permission_faq"),
+                shape = RoundedCornerShape(6.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = RescueCyan),
+                border = androidx.compose.foundation.BorderStroke(1.dp, RescueCyan.copy(alpha = 0.5f))
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Read Full Accidental Revocation & Edge-Cases FAQ",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun DurabilityItem(
+    title: String,
+    status: String,
+    desc: String,
+    isPositive: Boolean
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(6.dp),
+        color = Color(0xFF0F172A)
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    fontSize = 11.5.sp
+                )
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isPositive) SuccessGreen else WarningAmber,
+                    fontSize = 10.sp
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = desc,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF94A3B8),
+                fontSize = 10.sp,
+                lineHeight = 13.sp
+            )
+        }
     }
 }
 
@@ -1333,6 +1795,152 @@ fun TerminalLogViewer(
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             color = color
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PcLogAccessCard(
+    onCopyPullCommand: () -> Unit,
+    onCopyDirectBootCommand: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("pc_log_access_card"),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = RescueSurfaceDark),
+        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCardBorder))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Usb,
+                        contentDescription = null,
+                        tint = RescueCyan,
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "READ LOGS FROM PC (BROKEN SCREEN RECOVERY)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color(0xFF1E293B)
+                ) {
+                    Text(
+                        text = "OFFLINE & SAFE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = SuccessGreen,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "When your phone's screen is broken, you can read the rescue log directly on your computer terminal via ADB:",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFCBD5E1),
+                fontSize = 11.sp
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Method 1: Pull from external storage
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(6.dp),
+                color = TerminalBackground,
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF334155)))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Standard Pull (External Storage Mirror):",
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "adb pull /sdcard/Android/data/.../files/scrcpy_rescue.log",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = TerminalText
+                        )
+                    }
+                    IconButton(
+                        onClick = onCopyPullCommand,
+                        modifier = Modifier.size(28.dp).testTag("btn_copy_pull_cmd")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy Pull Command",
+                            tint = RescueCyan,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Method 2: Direct Boot run-as
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(6.dp),
+                color = TerminalBackground,
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF334155)))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Direct Boot Pull (Works before phone PIN unlock):",
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "adb exec-out run-as ... cat files/scrcpy_rescue.log > phone.log",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = TerminalText
+                        )
+                    }
+                    IconButton(
+                        onClick = onCopyDirectBootCommand,
+                        modifier = Modifier.size(28.dp).testTag("btn_copy_direct_boot_cmd")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy Direct Boot Command",
+                            tint = RescueCyan,
+                            modifier = Modifier.size(14.dp)
                         )
                     }
                 }

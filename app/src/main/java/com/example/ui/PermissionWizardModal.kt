@@ -88,9 +88,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.collectAsState
 import androidx.core.content.ContextCompat
 import com.example.core.ConnectivityMonitor
+import com.example.core.LogLevel
 import com.example.core.RescueEngine
+import com.example.core.RescueLogger
 import com.example.service.RescueAccessibilityService
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorRedBg
@@ -108,14 +115,15 @@ import com.example.ui.theme.WarningAmberBg
 @Composable
 fun PermissionWizardModal(
     onDismiss: () -> Unit,
-    onRerunRoutine: () -> Unit
+    onRerunRoutine: () -> Unit,
+    initialTab: Int = 0
 ) {
     val context = LocalContext.current
     val isSamsung = remember { Build.MANUFACTURER.equals("samsung", ignoreCase = true) }
     val totalSteps = if (isSamsung) 5 else 4
 
     var currentStep by remember { mutableIntStateOf(1) }
-    var viewMode by remember { mutableStateOf(0) } // 0 = Sequential Wizard, 1 = Full Guide
+    var viewMode by remember { mutableIntStateOf(initialTab) } // 0 = Sequential Wizard, 1 = Full Guide
 
     // Live permission states
     var isNotificationGranted by remember { mutableStateOf(checkNotificationPermission(context)) }
@@ -222,7 +230,7 @@ fun PermissionWizardModal(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // View Mode Tabs: Sequential Wizard vs Recovery Guide
+                // View Mode Tabs: Setup Guide, FAQ, Logs, PC Software
                 TabRow(
                     selectedTabIndex = viewMode,
                     containerColor = RescueSurfaceDark,
@@ -238,22 +246,28 @@ fun PermissionWizardModal(
                         selected = viewMode == 0,
                         onClick = { viewMode = 0 },
                         text = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Default.Security, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Sequential Wizard (Step $currentStep of $totalSteps)", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
-                            }
+                            Text("Setup", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     )
                     Tab(
                         selected = viewMode == 1,
                         onClick = { viewMode = 1 },
                         text = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Default.HelpOutline, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Recovery Guide", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
-                            }
+                            Text("FAQ & Tips", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    )
+                    Tab(
+                        selected = viewMode == 2,
+                        onClick = { viewMode = 2 },
+                        text = {
+                            Text("Live Logs", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    )
+                    Tab(
+                        selected = viewMode == 3,
+                        onClick = { viewMode = 3 },
+                        text = {
+                            Text("PC Software", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     )
                 }
@@ -341,10 +355,20 @@ fun PermissionWizardModal(
                             onDismiss()
                         }
                     )
-                } else {
+                } else if (viewMode == 1) {
                     // Full Help and Recovery Guide
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         RecoveryGuideTab()
+                    }
+                } else if (viewMode == 2) {
+                    // Live Terminal Execution Logs
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        ModalTerminalLogsTab()
+                    }
+                } else {
+                    // Future PC Software Companion Guide
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        ModalPcSoftwareTab()
                     }
                 }
             }
@@ -1324,6 +1348,57 @@ private fun RecoveryGuideTab() {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // Accidental Revocation & Developer Options Behavior FAQ
+        Card(
+            modifier = Modifier.fillMaxWidth().testTag("card_accidental_revocation_faq"),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2338)),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCyan))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = RescueCyan,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "FAQ: What If I Turn Off Developer Options Or Revoke Permissions?",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = RescueCyan,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                GuideBullet(
+                    title = "Q: If I turn Developer Options OFF, will it stay off or lose permissions?",
+                    body = "NO! The master permission (WRITE_SECURE_SETTINGS) is stored permanently in Android's package manager (/data/system/packages.xml). Turning off Developer Options only flips a switch—it NEVER revokes WRITE_SECURE_SETTINGS. As soon as you plug in a USB cable or open the app, Scrcpy Rescue automatically re-enables Developer Options & USB Debugging with zero touch!"
+                )
+
+                GuideBullet(
+                    title = "Q: What if I tap 'Revoke USB debugging authorizations'?",
+                    body = "This only wipes the computer's saved RSA key (/data/misc/adb/adb_keys). On your next connection, Android will pop up 'Allow USB debugging from this computer?'. The app's Accessibility Service automatically catches this popup, checks 'Always allow', and taps 'Allow' within 500ms—instantly giving access back!"
+                )
+
+                GuideBullet(
+                    title = "Q: What happens if the phone restarts or the screen goes black?",
+                    body = "Scrcpy Rescue includes a BootReceiver and a Foreground Service with WakeLock. On reboot or USB cable attachment, it immediately wakes up and ensures USB Debugging is turned back on."
+                )
+
+                GuideBullet(
+                    title = "Q: What are the ONLY things that would require re-running the PC command?",
+                    body = "1. Uninstalling the Scrcpy Rescue app.\n2. Tapping 'Clear storage' / 'Clear data' in App Info.\n3. Turning ON 'Auto Blocker' on Samsung One UI (keep Auto Blocker OFF in Settings > Security and privacy)."
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp),
@@ -1483,5 +1558,259 @@ private fun openAppSettings(context: Context) {
         context.startActivity(intent)
     } catch (e: Exception) {
         Toast.makeText(context, "Could not open App Details: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun ModalTerminalLogsTab() {
+    val context = LocalContext.current
+    val logs by RescueLogger.logs.collectAsState()
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(logs.size) {
+        if (logs.isNotEmpty()) {
+            listState.animateScrollToItem(logs.size - 1)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("modal_terminal_logs_tab")
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "LIVE EXECUTION LOGS (${logs.size} entries)",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = RescueCyan
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        val text = logs.joinToString("\n") { "[${it.timestamp}] [${it.level.name}] ${it.message}" }
+                        copyTextToClipboard(context, text)
+                    },
+                    modifier = Modifier.height(28.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = RescueCyan)
+                ) {
+                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(12.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Copy All", fontSize = 10.sp)
+                }
+
+                OutlinedButton(
+                    onClick = { RescueLogger.clear() },
+                    modifier = Modifier.height(28.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF94A3B8))
+                ) {
+                    Text("Clear", fontSize = 10.sp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Card(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = TerminalBackground),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCardBorder))
+        ) {
+            if (logs.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No log entries yet. Connect USB to see events.", color = Color(0xFF64748B), fontSize = 12.sp)
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
+                ) {
+                    items(logs) { entry ->
+                        val color = when (entry.level) {
+                            LogLevel.SUCCESS -> SuccessGreen
+                            LogLevel.ERROR -> ErrorRed
+                            LogLevel.WARN -> WarningAmber
+                            LogLevel.INFO -> TerminalText
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+                            Text(
+                                text = "[${entry.timestamp}] ",
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color(0xFF64748B)
+                            )
+                            Text(
+                                text = "[${entry.level.name}] ",
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = color
+                            )
+                            Text(
+                                text = entry.message,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = color
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModalPcSoftwareTab() {
+    val context = LocalContext.current
+    val scrollState = rememberScrollState()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .testTag("modal_pc_software_tab")
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = RescueSurfaceDark),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCyan))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Terminal,
+                        contentDescription = null,
+                        tint = RescueCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Future PC Companion Software Guide",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Can you connect your planned PC software to this app? YES! It is 100% possible.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = SuccessGreen,
+                    fontSize = 12.sp
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "Because this app keeps USB Debugging active and automatically approves PC authorizations, any desktop software on Windows, Mac, or Linux can communicate with this phone over standard USB.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = RescueSurfaceDark),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCardBorder))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "3 Ways Your PC Software Can Talk to This Phone",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = RescueCyan
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                GuideBullet(
+                    title = "1. Direct ADB Shell Commands",
+                    body = "Your PC program (Python, C#, Electron, Go) can execute adb commands directly to read files, launch activities, or receive device status."
+                )
+
+                GuideBullet(
+                    title = "2. High-Speed Local Socket ('adb forward')",
+                    body = "Your PC program can forward a local TCP port (e.g., adb forward tcp:8080 tcp:8080). This lets your PC program and Android app exchange live data over a super-fast socket connection without internet."
+                )
+
+                GuideBullet(
+                    title = "3. Scrcpy Screen Streaming",
+                    body = "Your desktop app can run scrcpy in the background or embed its video stream directly inside your custom PC window."
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(RescueCardBorder))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Quick PC Test Commands",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8)
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "Test connection from your PC command prompt:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 11.sp
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "adb devices",
+                        fontFamily = FontFamily.Monospace,
+                        color = RescueCyan,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    OutlinedButton(
+                        onClick = { copyTextToClipboard(context, "adb devices") },
+                        modifier = Modifier.height(26.dp),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text("Copy", fontSize = 10.sp)
+                    }
+                }
+            }
+        }
     }
 }

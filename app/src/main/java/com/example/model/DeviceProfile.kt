@@ -75,6 +75,7 @@ object DeviceProfileResolver {
         checkboxTexts = MULTI_LANG_CHECKBOX_TEXTS,
         allowButtonTexts = MULTI_LANG_ALLOW_BUTTON_TEXTS,
         targetPackages = setOf(
+            "android",
             "com.android.systemui",
             "com.android.settings",
             "com.sonymobile.systemui"
@@ -102,12 +103,13 @@ object DeviceProfileResolver {
         checkboxTexts = MULTI_LANG_CHECKBOX_TEXTS,
         allowButtonTexts = MULTI_LANG_ALLOW_BUTTON_TEXTS,
         targetPackages = setOf(
+            "android",
             "com.android.systemui",
             "com.android.settings",
             "com.samsung.android.settings",
             "com.samsung.android.systemui"
         ),
-        notes = "Samsung One UI (Android 14/15, API 34/35): " +
+        notes = "Samsung One UI (One UI 6, 7 & 8 / Android 14, 15, 16): " +
                 "Auto Blocker (Settings > Security and privacy > Auto Blocker) blocks USB commands if enabled. " +
                 "Restricted Settings must be allowed for Accessibility on Android 13+. " +
                 "Battery must be set to 'Unrestricted'."
@@ -129,6 +131,7 @@ object DeviceProfileResolver {
         checkboxTexts = MULTI_LANG_CHECKBOX_TEXTS,
         allowButtonTexts = MULTI_LANG_ALLOW_BUTTON_TEXTS,
         targetPackages = setOf(
+            "android",
             "com.android.systemui",
             "com.android.settings"
         ),

@@ -1,122 +1,116 @@
-# Windows Android: Zero-Touch Rescue & Connectivity Dashboard
+# UI Simplification & Future PC Companion Software Integration
 
-Comprehensive verification and enhancement plan for the zero-touch broken screen recovery application targeting Sony Xperia XZ3 (Android 10) and Samsung Galaxy S21 FE (Android 14/15), featuring a prominent real-time connectivity status dashboard.
+A clean, distraction-free redesign of the main interface—reducing screen clutter to direct, plain-English essentials while moving technical logs and documentation into the Help Guide modal, plus an architectural blueprint for future PC software integration.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following user preferences were confirmed during clarification and will govern the dashboard presentation and feedback behavior:
+> The following user preferences were confirmed and will guide the UI simplification:
 
-- **Confirmed Decision 1 (Connectivity Dashboard)**: Implemented as a prominent, high-visibility card at the top of the screen featuring live status badges for USB physical connection, power charging state, ADB daemon status, and Accessibility Service authorization.
-- **Confirmed Decision 2 (Sensory Feedback)**: When all preparation steps verify successfully, the app maximizes alarm volume and plays the loud alarm ringtone paired with haptic vibration for exactly 10 seconds, then restores the user's previous volume level.
+- **Confirmed Decision 1 (Minimal Main Screen)**: The main screen will contain only three clean sections:
+  1. **Live Connection Card**: Direct status ("Ready for PC", "Connected to PC", or "Wall Charging - Alarm Off").
+  2. **Alarm Sound & Quick Test**: Clean sound selector with straightforward "Test Alarm" and "Stop" buttons.
+  3. **Action & Help Bar**: Clear "Help & Setup Guide" button and "Check Now" button.
+- **Confirmed Decision 2 (Move Technical Stuff to Help Modal)**: All heavy text walls, technical durability items, device profile notes, and the raw terminal execution log viewer will be moved into the **Help & Setup Guide** modal as clean, dedicated tabs so the main screen remains simple and uncluttered.
+- **Confirmed Decision 3 (Direct, Plain English)**: Short, plain-English labels without developer jargon (e.g., using "Connected to PC" instead of `Settings.Global.DEVELOPMENT_SETTINGS_ENABLED` or `RECEIVER_EXPORTED`).
+- **Confirmed Decision 4 (Future PC Software Integration)**: Verified and architected using standard ADB commands (`adb forward`, `adb shell am broadcast`, or TCP sockets).
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**: "Windows Android" enables rapid zero-touch computer tethering and display mirroring via `scrcpy` for smartphones with shattered, flickering, or touch-unresponsive displays. Upon app open (or Google Assistant voice launch *"Windows Android"*), USB connection, power plug-in, or system reboot, the app automatically enables Developer Options, turns on USB debugging, activates its auto-allow accessibility service, and dismisses the computer RSA key prompt.
-- **Target Audience & Devices**: Users recovering data or controlling broken phones—specifically tested on Sony Xperia XZ3 (AOSP-like Android 10) and Samsung Galaxy S21 FE (Samsung One UI Android 14/15).
-- **Key Value**: Operates completely blind with zero touchscreen interaction required; provides non-visual sensory feedback (loud alarm and distinct vibration patterns) so the user knows exactly when the phone is ready for `scrcpy`.
+- **Streamlined User Experience**: When users open the app on a broken or shattered screen, they need clear, high-contrast, uncluttered information at a glance. Cutting unnecessary text walls makes navigation effortless and visual comprehension instant.
+- **Future PC Companion Compatibility**: Because the app ensures USB Debugging is active and automatically accepts computer authorization prompts, any desktop software (Windows, macOS, or Linux) built in C#, Python, Electron, Rust, or Go can communicate with this phone over USB without requiring any screen touches.
 
 ---
 
 ## 2. User Experience & Visual Design
 
+### New Clean Main Screen Layout
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Windows Android                             [ ? Help ]   │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  ● READY FOR PC                                    │  │
+│  │    Plug phone into computer USB to mirror.         │  │
+│  │                                                    │  │
+│  │    [ USB: PC Ready ]        [ Debugging: Active ]  │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  ALARM & SOUND                                     │  │
+│  │  Sound: Default Alarm (100% Volume on PC plug-in)  │  │
+│  │  [ Choose Sound ]    [ Test Alarm ]    [ Stop ]    │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  [  ★  Open Help & Setup Guide                        ]  │
+│  [  ▶  Check Settings Now                             ]  │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
 ### Key User Flows
 
-1. **Launch / Plug-In Flow**:
-   - The user opens the app (or plugs in USB / says *"Hey Google, open Windows Android"*).
-   - The foreground service immediately spins up, keeping the CPU awake and screen flags on.
-   - The 3-step preparation routine executes automatically in under 500 ms.
-2. **Dashboard & Status Visualization**:
-   - A new **Live Connectivity & ADB Dashboard** card sits prominently at the top, showing real-time USB cable link, power connection state, ADB daemon toggle, and Accessibility engine state.
-   - Quick-refresh actions and status indicators dynamically update whenever the cable is inserted or removed.
-3. **Sensory Completion**:
-   - As soon as all settings are verified, the phone blasts 10 seconds of alarm audio at 100% volume and continuous vibration.
-   - When the user connects their PC, the Accessibility Service detects the "Allow USB debugging?" dialog within 500 ms, checks "Always allow from this computer", and clicks "Allow".
-4. **Volume Restoration**:
-   - When the user exits the app or scrcpy disconnects, the original alarm stream volume (even if previously muted or low) is restored.
-
-### Visual Identity & Theme
-
-- **Aesthetic Direction**: High-contrast, dark-mode terminal utility inspired by server dashboards and diagnostic tooling (`RescueSlate` #0F172A, `RescueSurfaceDark` #1E293B, cyan highlights #06B6D4, emerald success #10B981, amber warning #F59E0B, and rose red #EF4444).
-- **Typography & Hierarchy**: Monospace logs for terminal execution entries, bold clean sans-serif for status badges and step titles, with micro-labels for system setting keys.
-- **Components**: Polished Material 3 Cards with subtle border strokes, animated state indicators, pill badges for active profiles, and tactile touch targets exceeding 48 dp.
+1. **At a Glance (Zero Distraction)**:
+   - On opening the app, the user sees only **Status** and **Alarm**.
+   - No walls of text or confusing log streams.
+2. **Connecting to PC**:
+   - The card instantly turns **Green**: `"Connected to Computer"`.
+   - The 10-second alarm sounds. Scrcpy or your PC software runs.
+3. **Plugging into Wall Charger**:
+   - The card turns **Slate Blue**: `"Wall Charger Connected - Alarm Silenced"`.
+4. **Accessing Technical Details & Logs**:
+   - Tapping the prominent **"Help & Setup Guide"** button opens the modal containing:
+     - **Tab 1: Simple Setup Guide** (Step-by-step 1-time setup).
+     - **Tab 2: Technical Logs** (The full live terminal execution log).
+     - **Tab 3: Settings FAQ** (Permission durability and edge cases).
+     - **Tab 4: PC Software Guide** (How your future PC program connects).
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 3. Future PC Software Integration Blueprint
 
-- **Decision 1: Real-Time Dynamic Broadcast Receivers Inside Foreground Service**
-  - *Chosen Approach*: Register `android.hardware.usb.action.USB_STATE` and `ACTION_POWER_CONNECTED` dynamically inside `RescueForegroundService` instead of static manifest declarations.
-  - *Why*: Modern Android (Android 8+ through 14+) blocks implicit broadcast delivery in the manifest for USB state changes. Registering inside a running foreground service with `RECEIVER_EXPORTED` complies with Android 14 security rules while ensuring reliable plug detection.
-- **Decision 2: 3-Layer Dialog Auto-Click Strategy**
-  - *Chosen Approach*: Layer 1 searches known view IDs (`android:id/alwaysUse`, `android:id/button1`). Layer 2 falls back to multi-lingual text scanning across 10 languages. Layer 3 calculates physical node coordinates and dispatches synthetic gesture taps via `dispatchGesture()`.
-  - *Why*: Guarantees compatibility across different OEM skins (Sony AOSP style vs Samsung One UI dialog modifications) without requiring root or display input.
-- **Decision 3: Non-Destructive Alarm Volume Memory**
-  - *Chosen Approach*: Capture current stream volume before maxing out, mark state, and restore in `onStop`/`onDestroy` or audio termination.
-  - *Why*: Respects user device state—rescuing a phone shouldn't permanently alter the user's alarm clock volume setting.
+### Is it possible to connect your planned PC software with this app?
+**Yes, 100% possible and very straightforward.**
 
----
+Because this app enables USB Debugging and automatically taps "Always allow from this computer" on the RSA popup, your future PC program can communicate with the phone over standard USB in three ways:
 
-## 4. Technical Architecture & Data Strategy
-
-### System Architecture Diagram
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Hardware & System Events                        │
-│   [USB Plug Attached]    [Power Connected]    [Boot Completed]   [App Launch]
-└────────────────────────────────────┬───────────────────────────────────┘
-                                     │
-                                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                    RescueForegroundService (Sticky)                    │
-│   • Partial WakeLock (Keep CPU active with screen off)                 │
-│   • Dynamic BroadcastReceiver (USB_STATE & POWER_CONNECTED)           │
-│   • Notification & Battery Exemption Manager                           │
-└────────────────────────────────────┬───────────────────────────────────┘
-                                     │ triggers
-                                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                             RescueEngine                               │
-│   Step 1: DEVELOPMENT_SETTINGS_ENABLED (Read -> Write -> Verify)       │
-│   Step 2: ADB_ENABLED (Read -> Write -> Verify)                        │
-│   Step 3: ENABLED_ACCESSIBILITY_SERVICES (Read -> Inject -> Verify)    │
-│   Step 4: HapticAndSoundFeedback (10s Max Alarm + 10s Vibration)       │
-└──────────────┬──────────────────────────────────────────┬──────────────┘
-               │                                          │
-               ▼                                          ▼
-┌──────────────────────────────┐          ┌──────────────────────────────┐
-│  RescueAccessibilityService  │          │   MainActivity (UI Layer)    │
-│  • 60s Dialog Scanning Loop  │          │  • Live Connectivity Card    │
-│  • Layer 1: View ID Matching │          │  • Step Progress Badges      │
-│  • Layer 2: Multi-Lang Text  │          │  • Alarm & Volume Controller │
-│  • Layer 3: Coordinate Tap   │          │  • OEM Profile Info Card     │
-│  • Ticks 'Always allow'      │          │  • Real-Time Terminal Logs   │
-│  • Clicks 'Allow' Button     │          │  • Action & Simulation Row   │
-└──────────────────────────────┘          └──────────────────────────────┘
-```
-
-### Data Model & State Mapping
-
-- **Live Connectivity State (`ConnectivityState`)**:
-  - `isUsbConnected: Boolean` (derived from USB_STATE and battery manager)
-  - `isPowerConnected: Boolean` (AC/USB charging source)
-  - `isAdbEnabled: Boolean` (live query of `Settings.Global.ADB_ENABLED`)
-  - `isDevOptionsEnabled: Boolean` (`Settings.Global.DEVELOPMENT_SETTINGS_ENABLED`)
-  - `isAccessibilityActive: Boolean` (StateFlow from `RescueAccessibilityService`)
-- **Routine Progress (`StepStatus`)**:
-  - Tracks verification state for Steps 1 through 4.
-- **Audio & Haptic Feedback (`AlarmSoundManager`)**:
-  - Custom URI, system default fallback, preserved original volume level.
-- **Log Stream (`RescueLogger`)**:
-  - In-memory StateFlow for terminal UI and append-only disk logging.
+1. **Standard ADB Commands (Simplest & Most Reliable)**:
+   - Your PC software (e.g. Python, C#, Node.js, or Electron) can bundle `adb.exe` and execute simple commands:
+     ```bash
+     # Launch an action or send a trigger to the app
+     adb shell am broadcast -a com.example.RESCUE_COMMAND
+     
+     # Launch screen mirroring (scrcpy)
+     scrcpy --stay-awake --turn-screen-off
+     
+     # Pull files or photos from phone to PC
+     adb pull /sdcard/DCIM/ ./backup_photos/
+     ```
+2. **High-Speed Direct Socket Communication (`adb forward`)**:
+   - Your PC software can forward a local TCP port to the phone:
+     ```bash
+     adb forward tcp:8080 tcp:8080
+     ```
+   - Then, your PC software connects to `localhost:8080` like a standard network connection. Any data, files, or commands can be streamed back and forth with near-zero latency.
+3. **Automated Companion Detection**:
+   - Your PC software can monitor USB connections: as soon as the phone is plugged in, the PC software detects `adb devices` and immediately starts your custom backup, data transfer, or mirroring workflow.
 
 ---
 
-## 5. Planned Verification & Enhancements
+## 4. Technical Implementation Steps
 
-1. **Connectivity Dashboard**: Add a high-visibility `ConnectivityDashboardCard` above the status banner showing live USB cable state, charging method, ADB server listening state, and accessibility service readiness.
-2. **Settings Synchronization**: Ensure dynamic live updates when the user toggles USB debugging or plugs/unplugs the USB cable.
-3. **Multi-device Testing & Compilation**: Run compilation and local Robolectric tests verifying state transitions, profile resolution for Sony vs Samsung, and accessibility node scanning.
+1. **Streamline `MainActivity.kt`**:
+   - Remove redundant decorative text, remove duplicate cards from main screen.
+   - Refactor into 2 clean, high-impact cards: `MinimalStatusCard` and `MinimalAlarmCard`.
+   - Provide direct action buttons (`Help Guide` and `Check Now`).
+2. **Relocate Details to `PermissionWizardModal.kt`**:
+   - Add a dedicated **"Terminal Logs"** tab inside the modal so users can view the full diagnostic log whenever needed without cluttering the primary UI.
+   - Retain all broken-screen guidance, device tips, and grant instructions inside the modal.
+3. **Keep Core Logic 100% Intact**:
+   - Preserve all PC-only USB detection, wall charger filtering, and conditional "touch only if turned off" settings logic.
+4. **Verification**:
+   - Compile and run automated unit tests to ensure all functionality and UI components verify with zero errors.

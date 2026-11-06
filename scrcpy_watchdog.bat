@@ -1,9 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
-title Scrcpy Zero-Touch Rescue Watchdog
+title Windows Android - Scrcpy Zero-Touch Rescue Watchdog
+
+:: Target package configuration for broken display recovery
+set PKG_NAME=com.aistudio.windowsandroid.uqdvkf
+set LOG_EXTERNAL_PATH=/sdcard/Android/data/%PKG_NAME%/files/scrcpy_rescue.log
 
 echo ================================================================
-echo          SCRCPY RESCUE WATCHDOG FOR BROKEN DISPLAYS
+echo      WINDOWS ANDROID - SCRCPY RESCUE WATCHDOG FOR BROKEN SCREENS
 echo ================================================================
 echo.
 echo Checking for ADB and scrcpy prerequisites...
@@ -32,7 +36,7 @@ adb start-server
 echo.
 echo Waiting for device connection...
 echo [INFO] Plug in your USB cable now.
-echo [INFO] Scrcpy Rescue app will automatically enable ADB and auto-allow authorization.
+echo [INFO] Windows Android will automatically enable ADB and auto-allow authorization.
 echo.
 
 :WATCH_LOOP
@@ -58,7 +62,9 @@ if "!DEVICE_FOUND!"=="0" (
 
 if "!DEVICE_STATE!"=="unauthorized" (
     echo [%TIME%] Device !SERIAL! is UNAUTHORIZED.
-    echo         Scrcpy Rescue Accessibility Service is auto-clicking 'Always allow' on device...
+    echo         Windows Android Accessibility Service is auto-clicking 'Always allow' on device...
+    echo         Fix command for permissions:
+    echo         adb shell pm grant %PKG_NAME% android.permission.WRITE_SECURE_SETTINGS
     timeout /t 2 /nobreak >nul
     goto :WATCH_LOOP
 )
@@ -74,6 +80,22 @@ if "!DEVICE_STATE!"=="device" (
     echo ================================================================
     echo [%TIME%] SUCCESS: Device !SERIAL! is AUTHORIZED AND READY!
     echo ================================================================
+    
+    :: Ensure WRITE_SECURE_SETTINGS permission is granted
+    echo [INFO] Ensuring WRITE_SECURE_SETTINGS permission is active...
+    adb -s !SERIAL! shell pm grant %PKG_NAME% android.permission.WRITE_SECURE_SETTINGS >nul 2>nul
+    
+    :: Pull phone rescue log to PC for reading later
+    echo [INFO] Pulling latest rescue log from device to PC...
+    adb -s !SERIAL! pull %LOG_EXTERNAL_PATH% ./scrcpy_rescue.log >nul 2>nul
+    if not exist scrcpy_rescue.log (
+        adb -s !SERIAL! exec-out run-as %PKG_NAME% cat files/scrcpy_rescue.log > ./scrcpy_rescue.log 2>nul
+    )
+    if exist scrcpy_rescue.log (
+        echo [OK] Phone rescue log retrieved and saved to './scrcpy_rescue.log'.
+    )
+
+    echo.
     echo Launching scrcpy with display rescue flags...
     echo (Flags: --stay-awake --turn-screen-off --power-off-on-close)
     echo.
@@ -81,7 +103,9 @@ if "!DEVICE_STATE!"=="device" (
     scrcpy -s !SERIAL! --stay-awake --turn-screen-off --power-off-on-close
 
     echo.
-    echo [%TIME%] scrcpy closed. Resuming monitoring loop...
+    echo [%TIME%] scrcpy closed. Updating phone rescue log...
+    adb -s !SERIAL! pull %LOG_EXTERNAL_PATH% ./scrcpy_rescue.log >nul 2>nul
+    echo [%TIME%] Resuming monitoring loop...
     echo ================================================================
     timeout /t 2 /nobreak >nul
     goto :WATCH_LOOP

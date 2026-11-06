@@ -2,23 +2,29 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Purely offline application: zero network, socket, or internet permissions declared -->
+
     <!-- Permission to toggle Developer Options, ADB, and Accessibility Services -->
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
 
-    <!-- Wake lock to keep device active with screen off or during routine -->
+    <!-- Wake lock to keep device active with screen off or during recovery routine -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Vibration for sensory feedback (success alarm, error vibration, timeout vibration) -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- Auto-trigger on device boot -->
+    <!-- Auto-trigger on device boot (covers BOOT_COMPLETED and LOCKED_BOOT_COMPLETED in Direct Boot) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Keep running as a foreground service with screen off -->
+    <!-- Keep running as a foreground service with screen off on Android 10 through 16 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Wake screen over lockscreen via Full Screen Intent on Android 10 through 16 -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Request ignoring battery optimizations so the service stays active -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -27,19 +33,20 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:fullBackupContent="@xml/backup_rules"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
 
-        <!-- Clean Launcher Activity: Works seamlessly with Google Assistant "Open Scrcpy Rescue" -->
+        <!-- Clean Launcher Activity: Direct Boot aware, turns screen on and shows when locked -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:directBootAware="true"
             android:label="@string/app_name"
             android:launchMode="singleTop"
             android:showWhenLocked="true"
@@ -51,19 +58,21 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground Service: Maintains USB listener, wakelock, and background watchdog -->
+        <!-- Foreground Service: Direct Boot aware, maintains USB listener, wakelock, and background watchdog -->
         <service
             android:name=".service.RescueForegroundService"
+            android:directBootAware="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="connectedDevice|specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Broken display device recovery for scrcpy wired mirroring" />
         </service>
 
-        <!-- Accessibility Service: Auto-confirms 'Allow USB debugging?' dialogs with zero touch -->
+        <!-- Accessibility Service: Direct Boot aware, auto-confirms 'Allow USB debugging?' dialogs with zero touch -->
         <service
             android:name=".service.RescueAccessibilityService"
+            android:directBootAware="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:label="@string/accessibility_service_label"
             android:exported="true">
@@ -75,13 +84,18 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- Boot Receiver: Starts foreground service on phone boot -->
+        <!-- Boot Receiver: Direct Boot aware, starts foreground service immediately on phone boot even BEFORE unlock -->
         <receiver
             android:name=".receiver.BootReceiver"
+            android:directBootAware="true"
             android:exported="true">
-            <intent-filter>
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.REBOOT" />
             </intent-filter>
         </receiver>
 

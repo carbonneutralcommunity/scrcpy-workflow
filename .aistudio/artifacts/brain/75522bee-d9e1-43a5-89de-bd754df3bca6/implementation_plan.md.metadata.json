@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for verifying end-to-end zero-touch recovery workflows and adding a prominent real-time connectivity status & USB debugging dashboard card.",
-  "updatedAt":  "2026-10-30T17:07:53.274303704Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plan to simplify the UI to a clean, minimal interface with low text and straight-forward English, move technical logs and durability cards into the Help Guide modal, and provide architecture for future PC software integration via ADB.",
+  "updatedAt": "2026-11-05T12:56:52.992241895Z",
+  "requestFeedback": true,
+  "userFacing": true
 }
